@@ -34,6 +34,27 @@ checked before the body is read), `png/jpeg/gif/webp` only, 15s timeout.
     POST /mcp      JSON-RPC, Authorization: Bearer <MCP_API_KEY>
     GET  /health   liveness
 
+## Connect from an MCP client
+
+Clients that support remote HTTP MCP servers can connect directly to `/mcp`.
+The exact configuration key names vary by client, but the connection is:
+
+```json
+{
+  "mcpServers": {
+    "image-fetch": {
+      "url": "https://<host>/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+No `uv` or local command is required. Clients that only support local `stdio`
+servers need an HTTP-to-stdio bridge.
+
 ## Register in Agent Studio
 
 Tools → register with the public HTTPS URL ending in `/mcp` and a header

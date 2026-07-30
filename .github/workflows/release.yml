@@ -1,4 +1,4 @@
-name: Release (ecr)
+name: Release (ecr + ghcr)
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  packages: write
 
 # One build per tag.
 concurrency:
@@ -16,7 +17,8 @@ concurrency:
 
 env:
   AWS_REGION: ap-northeast-2
-  IMAGE: 396608815058.dkr.ecr.ap-northeast-2.amazonaws.com/mcp-image-fetch
+  ECR_IMAGE: 396608815058.dkr.ecr.ap-northeast-2.amazonaws.com/mcp-image-fetch
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/mcp-image-fetch
 
 jobs:
   verify:
@@ -45,6 +47,13 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -60,7 +69,9 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:latest
+            ${{ env.ECR_IMAGE }}:${{ github.ref_name }}
+            ${{ env.ECR_IMAGE }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ github.ref_name }}
+            ${{ env.GHCR_IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
