@@ -1,9 +1,13 @@
-# The build context is the whole working directory, and the Dockerfile copies
-# four files and src/ out of it. Verify runs `npm ci` before `docker build`, so
-# without this every pull request tars up the node_modules tree it just
-# installed — thousands of files — along with the git history, and sends the lot
-# to the daemon before the first COPY runs.
+# Not an optimisation. BuildKit transfers only the files a COPY asks for, and
+# the Dockerfile asks for four by name plus src/ — the build context measured
+# 88kB without this file and the step took the same nine seconds either way.
+#
+# It is a guard. The day a `COPY . .` appears, or a `.env` or a local `dist/` is
+# sitting in the working directory when the release workflow runs, this is what
+# keeps it out of an image that gets pushed to two registries.
 node_modules/
 dist/
 .git/
 .github/
+.env*
+*.log
