@@ -118,6 +118,8 @@ test("an IPv4 address embedded in an IPv6 one is judged on the IPv4 address", as
     "::ffff:169.254.169.254", // IPv4-mapped, dotted
     "::ffff:a9fe:a9fe", // the same address as the URL parser normalises it
     "::ffff:127.0.0.1",
+    "::ffff:0:127.0.0.1", // IPv4-translated: the marker sits one hextet earlier
+    "::ffff:0:a9fe:a9fe",
     "::7f00:1", // IPv4-compatible, deprecated but still parsed
     "64:ff9b::a9fe:a9fe", // NAT64 well-known prefix → cloud metadata
     "64:ff9b::169.254.169.254",
@@ -130,8 +132,21 @@ test("an IPv4 address embedded in an IPv6 one is judged on the IPv4 address", as
 
 test("the same embedded forms still allow public addresses through", async () => {
   // Blocking these ranges outright would take most of the internet with them.
-  for (const address of ["::ffff:8.8.8.8", "64:ff9b::8.8.8.8", "2002:5db8:d822::"]) {
+  for (const address of ["::ffff:8.8.8.8", "::ffff:0:8.8.8.8", "64:ff9b::8.8.8.8", "2002:5db8:d822::"]) {
     await allowed(`http://[${address}]/`);
+  }
+});
+
+test("an address that does not parse cleanly is refused, not read as far as it goes", async () => {
+  // `isIP` accepts a zone id, and parsing a hextet with `parseInt` stops at the
+  // `%` rather than failing — so the address would be judged on a prefix of
+  // itself. A resolver does return these for a link-local answer.
+  for (const address of ["2606:2800:220:1:248:1893:25c8:1946%eth0", "fe80::1%eth0"]) {
+    assert.match(
+      await blocked("https://x.example.com/", resolvesTo(address)),
+      /private or reserved address/,
+      address,
+    );
   }
 });
 

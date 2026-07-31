@@ -87,9 +87,15 @@ const BLOCKED_IPV6: [number[], number][] = [
  * through `::ffff:0:0/96` — so the embedded address is what gets judged.
  * `64:ff9b::/96` is the one that earns its place: on a network with NAT64,
  * `64:ff9b::a9fe:a9fe` *is* the cloud metadata endpoint.
+ *
+ * `::ffff:0:0:0/96` is the mapped range's trick one hextet over — SIIT's
+ * translated form, which puts the `ffff` marker at hextet 4 rather than 5, so
+ * neither the mapped entry nor `::/96` matches it and `::ffff:0:127.0.0.1` is
+ * a loopback address written in a spelling that passed.
  */
 const EMBEDDED_IPV4: [number[], number, number][] = [
   [[0, 0, 0, 0, 0, 0xffff, 0, 0], 96, 6], // ::ffff:0:0/96 IPv4-mapped
+  [[0, 0, 0, 0, 0xffff, 0, 0, 0], 96, 6], // ::ffff:0:0:0/96 IPv4-translated
   [[0x0064, 0xff9b, 0, 0, 0, 0, 0, 0], 96, 6], // 64:ff9b::/96 NAT64 well-known
   [[0x2002, 0, 0, 0, 0, 0, 0, 0], 16, 1], // 2002::/16 6to4
 ];
@@ -117,7 +123,16 @@ function hextetsOf(ip: string): number[] | undefined {
     return undefined;
   }
   const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
-  return groups.length === 8 ? groups.map((group) => parseInt(group, 16)) : undefined;
+  // Each group is checked rather than handed straight to `parseInt`, which stops
+  // at the first character it cannot use instead of failing: `isIP` accepts a
+  // zone id, and `parseInt("1946%eth0", 16)` is 0x1946 — so
+  // `2606:2800::25c8:1946%eth0` would be judged on a prefix of itself. This is a
+  // security boundary; an address it cannot read has to come back `undefined`
+  // and be refused, which is what the caller's `if (!hextets) return true` does.
+  if (groups.length !== 8 || !groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) {
+    return undefined;
+  }
+  return groups.map((group) => parseInt(group, 16));
 }
 
 function inIpv6Prefix(hextets: number[], prefix: number[], bits: number): boolean {
