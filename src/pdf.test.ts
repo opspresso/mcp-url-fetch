@@ -74,7 +74,24 @@ test("a scan is an error, never an empty success", () => {
 });
 
 test("a document with no pages is an error too", () => {
-  assert.throws(() => selectPages([], 0, 1000), PdfError);
+  assert.throws(
+    () => selectPages([], 0, 1000),
+    (error: unknown) =>
+      error instanceof PdfError &&
+      /no pages/.test(error.message) &&
+      // Not the scan diagnosis above: there are no pages here whose text layer
+      // could be missing, so OCR is not the thing to go and try.
+      !/OCR/.test(error.message),
+  );
+});
+
+test("a page that fits whole is not reported as cut", () => {
+  // The blank page ahead of it is charged for a separator, so this page is
+  // rejected by one character and reaches the single-page path — where nothing
+  // was in fact cut off it.
+  const result = selectPages(["", page(99)], 2, 100);
+  assert.equal(result.text, page(99));
+  assert.equal(result.note, "page 2 of 2");
 });
 
 test("whatever comes back, it is never empty", () => {

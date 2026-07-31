@@ -69,6 +69,12 @@ export async function pdfToText(bytes: Uint8Array, maxChars: number): Promise<Pd
  */
 export function selectPages(pages: string[], totalPages: number, maxChars: number): PdfText {
   const cleaned = pages.map((page) => page.replace(/[^\S\n]+/g, " ").trim());
+  if (cleaned.length === 0) {
+    // Ahead of the scan check below, which `[].every` would answer `true` — a
+    // document with no pages has no text layer to be missing, and sending the
+    // model to find an OCR path for it is a dead end it cannot detect.
+    throw new PdfError("the PDF has no pages, so there is nothing to extract");
+  }
   if (cleaned.every((page) => page === "")) {
     // Silence here would be read as "the document is empty", which is a
     // different and much more damaging answer than "I could not read it".
@@ -97,9 +103,19 @@ export function selectPages(pages: string[], totalPages: number, maxChars: numbe
   if (kept.every((page) => page === "")) {
     // Safe: the all-blank document threw above, so there is a page with text.
     const first = cleaned.findIndex((page) => page !== "");
+    const whole = cleaned[first]!;
+    const text = whole.slice(0, maxChars);
     return {
-      text: cleaned[first]!.slice(0, maxChars),
-      note: `page ${first + 1} of ${totalPages}, itself cut at ${maxChars.toLocaleString("en-US")} characters`,
+      text,
+      // Only claim a cut when there was one. A blank page ahead of this one is
+      // charged for a separator, so a page that fits the budget whole can still
+      // be rejected by those two characters and land here — and being told to
+      // expect missing text there sends the model looking for a tail that is not
+      // missing.
+      note:
+        text.length < whole.length
+          ? `page ${first + 1} of ${totalPages}, itself cut at ${maxChars.toLocaleString("en-US")} characters`
+          : `page ${first + 1} of ${totalPages}`,
     };
   }
 
