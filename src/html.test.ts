@@ -68,6 +68,16 @@ test("an unterminated dropped element does not leak its contents as prose", () =
   assert.equal(htmlToText(`<p>prose</p><!-- a comment that never closes`), "prose");
 });
 
+test("a self-closing dropped element is not an unterminated one", () => {
+  // `application/xhtml+xml` is a type this reads, and there `<script src="a"/>`
+  // is how a script is written. It has no contents and no closing tag to look
+  // for, so treating it as unterminated took the rest of the document with it.
+  assert.equal(htmlToText(`<p>before</p><script src="a.js"/><p>after</p>`), "before\n\nafter");
+  assert.equal(htmlToText(`<p>before</p><svg/><p>after</p>`), "before\n\nafter");
+  // And an attribute that merely ends in a slash still opens a real element.
+  assert.equal(htmlToText(`<p>before</p><script data-p="a/">x</script><p>after</p>`), "before\n\nafter");
+});
+
 test("ignores an unterminated tag rather than eating the document", () => {
   assert.equal(htmlToText("<p>visible</p><div class="), "visible");
 });

@@ -107,9 +107,14 @@ export function htmlToText(html: string): string {
   // `stripTags` to remove the tag and hand the model the script source it
   // wrapped, labelled as the document's prose. Consuming to the end of the input
   // is also what a parser does with an unterminated raw-text element.
+  //
+  // `(?<!/)` is what keeps that from eating a document whole: `<script src="a"/>`
+  // is a self-closing tag, ordinary in the XHTML this server also accepts, and it
+  // has no contents and no closer to look for. Without the lookbehind it opened
+  // an element that ran to the end of the page.
   for (const element of DROPPED_ELEMENTS) {
     text = text.replace(
-      new RegExp(`<${element}\\b[^>]*>[\\s\\S]*?(?:<\\/${element}\\s*>|$)`, "gi"),
+      new RegExp(`<${element}\\b[^>]*(?<!/)>[\\s\\S]*?(?:<\\/${element}\\s*>|$)`, "gi"),
       " ",
     );
   }
