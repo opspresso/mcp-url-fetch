@@ -39,7 +39,7 @@ const TOOLS = [
   {
     name: "fetch_image",
     description:
-      "Download an image from an https URL and return its bytes, so the image can be looked at, " +
+      "Download an image from an http(s) URL and return its bytes, so the image can be looked at, " +
       "edited, or handed to an image model. Use this when another tool gave you a picture's " +
       "address rather than the picture. Returns the image itself, not a description of it. " +
       "For a document at a URL, use fetch_document instead.",
@@ -48,7 +48,7 @@ const TOOLS = [
   {
     name: "fetch_document",
     description:
-      "Download a document or web page from an https URL and return its text. Handles plain " +
+      "Download a document or web page from an http(s) URL and return its text. Handles plain " +
       "text, Markdown, CSV, JSON, XML, HTML (converted to readable text) and PDF (text " +
       "extracted). Use this to read something you only have a link to — a report, a spec, a " +
       "data file, an article. Returns the contents, not a summary. For an image, use " +
