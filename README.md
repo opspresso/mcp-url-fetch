@@ -54,9 +54,11 @@ address, and cross-origin redirects are refused.
 The IPv6 side is a range table rather than a prefix match on the text, because
 several IPv6 ranges carry an IPv4 address inside them and are globally routable
 in their own right. `64:ff9b::a9fe:a9fe` is the cloud metadata endpoint on any
-network with NAT64; `::ffff:`, `2002::` and the deprecated IPv4-compatible form
-reach the same places. Each is judged on the address it carries, so the public
-internet still resolves through them.
+network with NAT64; `::ffff:`, its translated spelling `::ffff:0:`, `2002::` and
+the deprecated IPv4-compatible form reach the same places. Each is judged on the
+address it carries, so the public internet still resolves through them — and an
+address the table cannot parse is refused rather than judged on however much of
+it did parse.
 
 On top of that: 5MB for an image and 10MB for a document (declared length
 checked first, then the stream cut the moment it goes over — a lying
