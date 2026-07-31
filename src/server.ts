@@ -20,7 +20,7 @@ import { asUntrustedContent, ContentError, fetchDocument, fetchImage } from "./f
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_NAME = "mcp-url-fetch";
 /** Tracks `version` in package.json; both are what a client is told this is. */
-const SERVER_VERSION = "1.1.0";
+const SERVER_VERSION = "1.1.1";
 const PORT = Number(process.env.PORT ?? 3000);
 /** Shared secret every caller must present. Unset means the server refuses to start. */
 const API_KEY = process.env.MCP_API_KEY;
