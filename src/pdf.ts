@@ -13,6 +13,37 @@
 
 import { extractText, getDocumentProxy } from "unpdf";
 
+/**
+ * `Math.sumPrecise` is a TC39 proposal, and no Node this runs on has it — not
+ * the 22 the image pins, not 26. The PDF.js build inside `unpdf` calls it while
+ * rebuilding an embedded font's glyph tables, so every font throws a TypeError
+ * that PDF.js catches and reports as a warning: one line per font, thirty-three
+ * of them for a fifteen-page paper. Two costs, and the second is the reason this
+ * is here — the font rebuild is abandoned rather than done, and the noise buries
+ * the failure lines `server.ts` writes on purpose in the same stream.
+ *
+ * Neumaier summation, not the proposal's exactly-rounded algorithm: the sums
+ * asked for are glyph byte counts and column widths, and carrying Shewchuk's
+ * expansion for three call sites that add integers would be the wrong trade. It
+ * is installed only if absent, so a future runtime's own implementation wins.
+ */
+const math = Math as unknown as { sumPrecise?: (values: Iterable<number>) => number };
+if (typeof math.sumPrecise !== "function") {
+  math.sumPrecise = (values) => {
+    let sum = 0;
+    let compensation = 0;
+    for (const value of values) {
+      const next = sum + value;
+      // The larger magnitude keeps its bits; the smaller one is what rounding
+      // drops, so that is the side the lost low bits are recovered from.
+      compensation +=
+        Math.abs(sum) >= Math.abs(value) ? sum - next + value : value - next + sum;
+      sum = next;
+    }
+    return sum + compensation;
+  };
+}
+
 export interface PdfText {
   text: string;
   /** What was returned, in the document's own units. */

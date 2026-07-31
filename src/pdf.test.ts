@@ -16,6 +16,20 @@ import { PdfError, selectPages } from "./pdf.js";
 
 const page = (chars: number) => "x".repeat(chars);
 
+test("the Math.sumPrecise the bundled PDF.js calls is there for it", () => {
+  // Importing this module installs it. PDF.js calls it while rebuilding an
+  // embedded font's glyph tables; without it every font throws, and the glyphs
+  // that rebuild would have mapped come back missing — the footnote markers
+  // vanished from a paper whose text otherwise looked complete.
+  const sum = (Math as unknown as { sumPrecise: (values: Iterable<number>) => number }).sumPrecise;
+  assert.equal(typeof sum, "function");
+  assert.equal(sum([]), 0);
+  assert.equal(sum([1, 2, 3]), 6);
+  // The compensation is the whole point: adding these left to right loses one
+  // of the ones to rounding at 1e16, where the gap between floats is 2.
+  assert.equal(sum([1e16, 1, -1e16, 1]), 2);
+});
+
 test("a document inside the budget comes back whole", () => {
   const result = selectPages(["one", "two", "three"], 3, 1000);
   assert.equal(result.text, "one\n\ntwo\n\nthree");
