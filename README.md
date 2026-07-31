@@ -56,7 +56,21 @@ checked first, then the stream cut the moment it goes over — a lying
 `content-length` must not decide how much is read into memory), 90,000
 characters of extracted text, a 15s timeout, and a content-type allowlist.
 
-`MCP_API_KEY` is required — the process exits rather than run open.
+### Authentication has two modes
+
+With `MCP_API_KEY` set, every request must present it as `Authorization: Bearer
+<key>`, compared in constant time. **With it unset, the server answers anyone
+that can reach it.**
+
+The open mode exists for the deployment this is built for: a Deployment behind a
+ClusterIP with no ingress, where the network is the boundary and a shared secret
+every pod already reaches adds something to rotate without adding something it
+protects against.
+
+That reasoning holds only while nothing routes to it from outside. The process
+states which mode it is in on the line after "listening", on every start — so the
+day an ingress appears in front of it, the open mode is visible in the logs
+rather than silent. **If you expose it, set the key.**
 
 ### What adding documents changed
 
@@ -93,9 +107,10 @@ failure they cannot.
 
 ## Run
 
-    MCP_API_KEY=<secret> PORT=3000 node dist/server.js
+    MCP_API_KEY=<secret> PORT=3000 node dist/server.js   # authenticated
+    PORT=3000 node dist/server.js                        # open — cluster-internal only
 
-    POST /mcp      JSON-RPC, Authorization: Bearer <MCP_API_KEY>
+    POST /mcp      JSON-RPC; Authorization: Bearer <MCP_API_KEY> when a key is set
     GET  /health   liveness
 
 ## Develop

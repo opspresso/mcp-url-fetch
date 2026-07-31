@@ -14,15 +14,15 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { authorizes, describeAuth } from "./auth.js";
 import { asUntrustedContent, ContentError, fetchDocument, fetchImage } from "./fetchContent.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_NAME = "mcp-url-fetch";
 /** Tracks `version` in package.json; both are what a client is told this is. */
-const SERVER_VERSION = "1.1.1";
+const SERVER_VERSION = "1.1.2";
 const PORT = Number(process.env.PORT ?? 3000);
-/** Shared secret every caller must present. Unset means the server refuses to start. */
+/** Shared secret callers must present. Unset means no authentication — see `auth.ts`. */
 const API_KEY = process.env.MCP_API_KEY;
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -59,17 +59,8 @@ const TOOLS = [
   },
 ] as const;
 
-/** Constant-time compare so a wrong key cannot be found one character at a time. */
-function keyMatches(presented: string): boolean {
-  const a = Buffer.from(presented);
-  const b = Buffer.from(API_KEY ?? "");
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 function authorized(request: IncomingMessage): boolean {
-  const header = request.headers.authorization ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
-  return token.length > 0 && keyMatches(token);
+  return authorizes(API_KEY, request.headers.authorization);
 }
 
 function toolError(text: string): unknown {
@@ -205,13 +196,16 @@ const server = createServer((request, response) => {
   })();
 });
 
-if (!API_KEY) {
-  console.error("MCP_API_KEY is not set. This server fetches arbitrary URLs; it will not run open.");
-  process.exit(1);
-}
-
 server.listen(PORT, () => {
-  console.log(`${SERVER_NAME} listening on :${PORT} (POST /mcp)`);
+  console.log(`${SERVER_NAME} v${SERVER_VERSION} listening on :${PORT} (POST /mcp)`);
+  // Always, not only when open: an operator reading logs to find out which mode
+  // an instance is in should not have to infer it from a line that is missing.
+  const notice = describeAuth(API_KEY);
+  if (API_KEY) {
+    console.log(notice);
+  } else {
+    console.warn(notice);
+  }
 });
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
