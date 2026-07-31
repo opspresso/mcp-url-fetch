@@ -55,38 +55,24 @@ export class PublicFetchError extends SsrfError {
 }
 
 /**
- * Fetch an operator-controlled URL through one outbound security boundary.
- * Every hop is DNS-checked, redirects may not cross origins (which prevents
- * forwarding stored credentials to another host), and native auto-following
- * is disabled so redirect targets cannot bypass validation.
+ * Fetch a URL through one outbound security boundary. Every hop is DNS-checked
+ * and native auto-following is disabled, so a redirect target cannot reach the
+ * network without having been judged first.
+ *
+ * The URL is one the *model* chose, not one an operator registered, so there is
+ * no earlier point at which anyone approved the address — checking per hop is
+ * not defence in depth here, it is the only check there is.
+ *
+ * Cross-origin redirects are refused rather than re-checked: the guard would
+ * still run on the new host, but a URL that answers by pointing somewhere else
+ * entirely is not the URL that was asked for, and every header the caller set
+ * travels with it.
  */
-export async function fetchPublicUrl(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<Response> {
-  let url =
-    input instanceof Request
-      ? new URL(input.url)
-      : input instanceof URL
-        ? new URL(input.href)
-        : new URL(input);
+export async function fetchPublicUrl(input: string | URL, init?: RequestInit): Promise<Response> {
+  // A copy either way — the loop below reassigns this on every redirect hop.
+  let url = new URL(input);
   const originalOrigin = url.origin;
-  const requestBody =
-    input instanceof Request && input.method !== "GET" && input.method !== "HEAD"
-      ? await input.clone().arrayBuffer()
-      : undefined;
-  let requestInit: RequestInit = {
-    ...(input instanceof Request
-      ? {
-          method: input.method,
-          headers: input.headers,
-          body: requestBody,
-          signal: input.signal,
-        }
-      : {}),
-    ...init,
-    redirect: "manual",
-  };
+  let requestInit: RequestInit = { ...init, redirect: "manual" };
 
   for (let redirects = 0; ; redirects += 1) {
     const resolved = await resolvePublicUrl(url.href);
