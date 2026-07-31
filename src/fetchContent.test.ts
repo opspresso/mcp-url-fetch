@@ -12,10 +12,12 @@ import {
   charsetFromHtml,
   decodeText,
   documentKind,
+  MAX_HTML_CHARS,
   MAX_TEXT_CHARS,
   parseContentType,
   truncateText,
 } from "./fetchContent.js";
+import { htmlToText } from "./html.js";
 
 test("parses a content-type into type and charset", () => {
   assert.deepEqual(parseContentType("text/html"), { mimeType: "text/html" });
@@ -93,6 +95,27 @@ test("the text budget leaves room for this server's own notice", () => {
   // Agent Studio cuts a tool result at 100,000 characters and appends a generic
   // notice. Cutting below that is what keeps the specific one.
   assert.ok(MAX_TEXT_CHARS < 100_000);
+});
+
+test("capping the HTML source does not change the answer", () => {
+  // The whole justification for MAX_HTML_CHARS: past it, the conversion is work
+  // whose output MAX_TEXT_CHARS discards. If a future change to the cap or to
+  // the converter made the capped and uncapped results differ, the cap would be
+  // silently losing content instead of losing waste.
+  const paragraph = `<p>${"lorem ipsum dolor sit amet ".repeat(20)}</p>`;
+  const page = paragraph.repeat(Math.ceil((MAX_HTML_CHARS * 1.1) / paragraph.length));
+  assert.ok(page.length > MAX_HTML_CHARS);
+
+  const whole = htmlToText(page).slice(0, MAX_TEXT_CHARS);
+  const capped = htmlToText(page.slice(0, MAX_HTML_CHARS)).slice(0, MAX_TEXT_CHARS);
+  assert.equal(capped.length, MAX_TEXT_CHARS);
+  assert.equal(capped, whole);
+});
+
+test("the HTML cap leaves ample room for a full text budget", () => {
+  // Prose is rarely under 5% of a page's bytes, so this ratio is the margin by
+  // which a real page still fills MAX_TEXT_CHARS after the source is cut.
+  assert.ok(MAX_HTML_CHARS / MAX_TEXT_CHARS > 20);
 });
 
 test("fetched text is labelled as untrusted, with its source", () => {
