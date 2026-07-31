@@ -98,7 +98,12 @@ export async function fetchPublicUrl(input: string | URL, init?: RequestInit): P
     }
     await response.body?.cancel();
     const next = new URL(location, url);
-    await resolvePublicUrl(next.href);
+    // Before any resolve, and without one of its own. A cross-origin hop is
+    // refused whatever it resolves to, so resolving first only bought a DNS
+    // query for a request that will not be made — and it reported a hop to a
+    // private address on another host as a private address rather than as the
+    // cross-origin redirect it is. The hop that survives this is resolved at the
+    // top of the next iteration, before anything is sent to it.
     if (next.origin !== originalOrigin) {
       throw new PublicFetchError(
         `Cross-origin redirect blocked: ${originalOrigin} -> ${next.origin}`,
