@@ -99,10 +99,19 @@ export function htmlToText(html: string): string {
   let text = html
     // Comments first: one can contain anything, including a `<script>` that the
     // element pass below would otherwise try to match across.
-    .replace(/<!--[\s\S]*?-->/g, " ");
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, " ");
 
+  // `|$` rather than requiring the close tag. The source reaching this function
+  // may have been cut mid-element — `MAX_HTML_CHARS` does exactly that — and an
+  // opening tag whose closer was cut off would otherwise match nothing, leaving
+  // `stripTags` to remove the tag and hand the model the script source it
+  // wrapped, labelled as the document's prose. Consuming to the end of the input
+  // is also what a parser does with an unterminated raw-text element.
   for (const element of DROPPED_ELEMENTS) {
-    text = text.replace(new RegExp(`<${element}\\b[^>]*>[\\s\\S]*?<\\/${element}\\s*>`, "gi"), " ");
+    text = text.replace(
+      new RegExp(`<${element}\\b[^>]*>[\\s\\S]*?(?:<\\/${element}\\s*>|$)`, "gi"),
+      " ",
+    );
   }
 
   text = collapseSource(text.replace(/<head\b[^>]*>[\s\S]*?<\/head\s*>/gi, " "));

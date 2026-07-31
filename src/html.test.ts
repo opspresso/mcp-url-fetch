@@ -58,6 +58,16 @@ test("a comment cannot swallow the markup after it", () => {
   assert.equal(htmlToText("<p>a</p><!-- <script>x</script> --><p>b</p>"), "a\n\nb");
 });
 
+test("an unterminated dropped element does not leak its contents as prose", () => {
+  // The source is cut at MAX_HTML_CHARS before it gets here, so this function
+  // does receive markup that stops mid-element. A `<script>` whose `</script>`
+  // was cut off used to have only its opening tag removed, and its JavaScript
+  // came back as the page's text.
+  assert.equal(htmlToText(`<p>prose</p><script>var secret = "token"; // cut here`), "prose");
+  assert.equal(htmlToText(`<p>prose</p><style>.a{color:red}`), "prose");
+  assert.equal(htmlToText(`<p>prose</p><!-- a comment that never closes`), "prose");
+});
+
 test("ignores an unterminated tag rather than eating the document", () => {
   assert.equal(htmlToText("<p>visible</p><div class="), "visible");
 });
