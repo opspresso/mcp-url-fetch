@@ -1,12 +1,14 @@
 /**
- * SSRF guard for operator-registered outbound URLs (MCP servers, external
- * agents). Rejects non-http(s) schemes and hosts that resolve to private,
- * loopback, link-local (incl. the 169.254.169.254 cloud metadata address), or
- * otherwise reserved ranges.
+ * SSRF guard for outbound URLs. Rejects non-http(s) schemes and hosts that
+ * resolve to private, loopback, link-local (incl. the 169.254.169.254 cloud
+ * metadata address), or otherwise reserved ranges.
  *
- * The DNS resolver is injectable so the check stays deterministic in tests. The
- * guard is applied both at registration and at dispatch; the dispatch check
- * narrows (but cannot fully close) the DNS-rebinding window between the two.
+ * This started as Agent Studio's guard, where the URLs were operator-registered
+ * and checked once at registration and again at dispatch. Here there is no
+ * registration step: the URL comes from a tool argument the *model* chose, so
+ * every call is an unreviewed address and this is the only place that judges it.
+ *
+ * The DNS resolver is injectable so the check stays deterministic in tests.
  */
 
 import { lookup } from "node:dns/promises";
@@ -34,6 +36,7 @@ const BLOCKED_IPV4: [string, number][] = [
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],
   ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
   ["192.168.0.0", 16],
   ["198.18.0.0", 15],
   ["198.51.100.0", 24],
@@ -56,30 +59,91 @@ function isBlockedIpv4(ip: string): boolean {
   return BLOCKED_IPV4.some(([base, bits]) => inCidr(ipLong, base, bits));
 }
 
+/**
+ * [prefix hextets, prefix bits] for IPv6 ranges that must never be dispatched to.
+ *
+ * A table rather than the string-prefix regexes this replaced, for the same
+ * reason IPv4 has one: `fc00::/7` and `fe80::/10` are not hextet-aligned, so a
+ * prefix match on the text is an approximation, and an approximation is what let
+ * multicast and the NAT64 ranges through.
+ */
+const BLOCKED_IPV6: [number[], number][] = [
+  // ::/96 — the unspecified address, ::1, and the deprecated IPv4-compatible form.
+  [[0, 0, 0, 0, 0, 0, 0, 0], 96],
+  [[0x0064, 0xff9b, 0x0001, 0, 0, 0, 0, 0], 48], // local-use NAT64
+  [[0x0100, 0, 0, 0, 0, 0, 0, 0], 64], // discard-only
+  [[0x2001, 0, 0, 0, 0, 0, 0, 0], 23], // IETF protocol assignments (Teredo, benchmarking)
+  [[0x2001, 0x0db8, 0, 0, 0, 0, 0, 0], 32], // documentation
+  [[0xfc00, 0, 0, 0, 0, 0, 0, 0], 7], // unique-local
+  [[0xfe80, 0, 0, 0, 0, 0, 0, 0], 10], // link-local
+  [[0xfec0, 0, 0, 0, 0, 0, 0, 0], 10], // site-local: deprecated, still assigned on old networks
+  [[0xff00, 0, 0, 0, 0, 0, 0, 0], 8], // multicast
+];
+
+/**
+ * Ranges that carry an IPv4 address inside them, and the hextet it starts at.
+ *
+ * These cannot be blocked outright — most of the public internet is reachable
+ * through `::ffff:0:0/96` — so the embedded address is what gets judged.
+ * `64:ff9b::/96` is the one that earns its place: on a network with NAT64,
+ * `64:ff9b::a9fe:a9fe` *is* the cloud metadata endpoint.
+ */
+const EMBEDDED_IPV4: [number[], number, number][] = [
+  [[0, 0, 0, 0, 0, 0xffff, 0, 0], 96, 6], // ::ffff:0:0/96 IPv4-mapped
+  [[0x0064, 0xff9b, 0, 0, 0, 0, 0, 0], 96, 6], // 64:ff9b::/96 NAT64 well-known
+  [[0x2002, 0, 0, 0, 0, 0, 0, 0], 16, 1], // 2002::/16 6to4
+];
+
+/** The eight 16-bit groups of an IPv6 address, or `undefined` if it is not one. */
+function hextetsOf(ip: string): number[] | undefined {
+  if (isIP(ip) !== 6) {
+    return undefined;
+  }
+  let text = ip.toLowerCase();
+  // A trailing dotted quad (`::ffff:1.2.3.4`) is two hextets written in IPv4
+  // notation. Rewriting it leaves the rest of this on one representation — and
+  // both forms do occur: a resolver returns the dotted one, the WHATWG URL
+  // parser normalises a literal to hex.
+  const dotted = /:(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (dotted?.[1]) {
+    const long = ipv4ToLong(dotted[1]);
+    text = `${text.slice(0, dotted.index + 1)}${(long >>> 16).toString(16)}:${(long & 0xffff).toString(16)}`;
+  }
+  const [head = "", tail] = text.split("::");
+  const left = head === "" ? [] : head.split(":");
+  const right = tail === undefined || tail === "" ? [] : tail.split(":");
+  const missing = tail === undefined ? 0 : 8 - left.length - right.length;
+  if (missing < 0) {
+    return undefined;
+  }
+  const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
+  return groups.length === 8 ? groups.map((group) => parseInt(group, 16)) : undefined;
+}
+
+function inIpv6Prefix(hextets: number[], prefix: number[], bits: number): boolean {
+  for (let index = 0; index * 16 < bits; index += 1) {
+    const remaining = bits - index * 16;
+    const mask = remaining >= 16 ? 0xffff : (0xffff << (16 - remaining)) & 0xffff;
+    if (((hextets[index] ?? 0) & mask) !== ((prefix[index] ?? 0) & mask)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isBlockedIpv6(ip: string): boolean {
-  const addr = ip.toLowerCase();
-  if (addr === "::1" || addr === "::") {
-    return true;
+  const hextets = hextetsOf(ip);
+  if (!hextets) {
+    return true; // unparseable → treat as unsafe
   }
-  // IPv4-mapped (::ffff:a.b.c.d). The WHATWG URL parser normalises the tail to
-  // hex (::ffff:a9fe:a9fe), so accept both the dotted and hex forms.
-  if (addr.startsWith("::ffff:")) {
-    const tail = addr.slice("::ffff:".length);
-    if (isIP(tail) === 4) {
-      return isBlockedIpv4(tail);
-    }
-    const hextets = tail.split(":");
-    const [hi, lo] = hextets;
-    if (hextets.length === 2 && hi !== undefined && lo !== undefined) {
-      const high = parseInt(hi, 16);
-      const low = parseInt(lo, 16);
-      if (Number.isInteger(high) && Number.isInteger(low)) {
-        return isBlockedIpv4(`${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`);
-      }
+  for (const [prefix, bits, at] of EMBEDDED_IPV4) {
+    if (inIpv6Prefix(hextets, prefix, bits)) {
+      const high = hextets[at] ?? 0;
+      const low = hextets[at + 1] ?? 0;
+      return isBlockedIpv4(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
     }
   }
-  // fc00::/7 unique-local, fe80::/10 link-local.
-  return /^f[cd]/.test(addr) || /^fe[89ab]/.test(addr);
+  return BLOCKED_IPV6.some(([prefix, bits]) => inIpv6Prefix(hextets, prefix, bits));
 }
 
 function isBlockedAddress(ip: string): boolean {
@@ -134,11 +198,4 @@ export async function resolvePublicUrl(
     }
   }
   return { url, addresses };
-}
-
-export async function assertPublicUrl(
-  rawUrl: string,
-  dnsLookup: DnsLookup = defaultLookup,
-): Promise<void> {
-  await resolvePublicUrl(rawUrl, dnsLookup);
 }
