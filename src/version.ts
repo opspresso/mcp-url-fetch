@@ -13,4 +13,4 @@
  */
 
 export const SERVER_NAME = "mcp-url-fetch";
-export const SERVER_VERSION = "1.1.2";
+export const SERVER_VERSION = "1.1.3";
