@@ -1,0 +1,9 @@
+# The build context is the whole working directory, and the Dockerfile copies
+# four files and src/ out of it. Verify runs `npm ci` before `docker build`, so
+# without this every pull request tars up the node_modules tree it just
+# installed — thousands of files — along with the git history, and sends the lot
+# to the daemon before the first COPY runs.
+node_modules/
+dist/
+.git/
+.github/
