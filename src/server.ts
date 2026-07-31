@@ -16,11 +16,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { authorizes, describeAuth } from "./auth.js";
 import { asUntrustedContent, ContentError, fetchDocument, fetchImage } from "./fetchContent.js";
+import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
-const SERVER_NAME = "mcp-url-fetch";
-/** Tracks `version` in package.json; both are what a client is told this is. */
-const SERVER_VERSION = "1.1.2";
 const PORT = Number(process.env.PORT ?? 3000);
 /** Shared secret callers must present. Unset means no authentication — see `auth.ts`. */
 const API_KEY = process.env.MCP_API_KEY;
@@ -41,7 +39,7 @@ const TOOLS = [
   {
     name: "fetch_image",
     description:
-      "Download an image from an https URL and return its bytes, so the image can be looked at, " +
+      "Download an image from an http(s) URL and return its bytes, so the image can be looked at, " +
       "edited, or handed to an image model. Use this when another tool gave you a picture's " +
       "address rather than the picture. Returns the image itself, not a description of it. " +
       "For a document at a URL, use fetch_document instead.",
@@ -50,7 +48,7 @@ const TOOLS = [
   {
     name: "fetch_document",
     description:
-      "Download a document or web page from an https URL and return its text. Handles plain " +
+      "Download a document or web page from an http(s) URL and return its text. Handles plain " +
       "text, Markdown, CSV, JSON, XML, HTML (converted to readable text) and PDF (text " +
       "extracted). Use this to read something you only have a link to — a report, a spec, a " +
       "data file, an article. Returns the contents, not a summary. For an image, use " +
@@ -87,7 +85,26 @@ async function callTool(name: unknown, args: { url?: unknown }): Promise<unknown
     // comes back as a tool error rather than a protocol one.
     const reason = error instanceof ContentError ? error.message : describe(error);
     const what = name === "fetch_image" ? "image" : "document";
+    // The model is told; without this the operator is not, and "everything to
+    // that host started failing on Tuesday" has no evidence behind it anywhere.
+    console.warn(`${String(name)} failed: ${originOf(args.url)} — ${reason}`);
     return toolError(`Error: could not fetch the ${what} — ${reason}`);
+  }
+}
+
+/**
+ * The origin, and nothing else. The URL is one the model read out of some other
+ * tool's output, and those carry their capability in the URL itself — a signed
+ * query string, or a secret path segment as a Slack webhook does. A log line is
+ * the last place either should come to rest, and the question this line is here
+ * to answer — "everything to that host started failing on Tuesday" — is asked
+ * about the host.
+ */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "(unparseable url)";
   }
 }
 
@@ -110,6 +127,11 @@ async function handle(message: JsonRpcRequest): Promise<unknown> {
       };
     case "tools/list":
       return { tools: TOOLS };
+    // Not gated behind a capability: ping is part of the base protocol and the
+    // receiver must answer it. A client using it as a keepalive reads an error
+    // here as a dead connection.
+    case "ping":
+      return {};
     case "tools/call": {
       const name = message.params?.name;
       if (!TOOLS.some((tool) => tool.name === name)) {
@@ -122,13 +144,16 @@ async function handle(message: JsonRpcRequest): Promise<unknown> {
   }
 }
 
+/** Distinguished from a parse failure so the caller is not sent to debug its JSON. */
+class BodyTooLarge extends Error {}
+
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += (chunk as Buffer).byteLength;
     if (size > MAX_BODY_BYTES) {
-      throw new Error("request body too large");
+      throw new BodyTooLarge(`request body is over the ${MAX_BODY_BYTES} byte limit`);
     }
     chunks.push(chunk as Buffer);
   }
@@ -143,11 +168,14 @@ function send(response: ServerResponse, status: number, body: unknown): void {
 
 const server = createServer((request, response) => {
   void (async () => {
-    if (request.url === "/health") {
+    // On the path alone: a probe or a proxy is free to append a query string,
+    // and matching the whole target turned `/health?x=1` into a 404.
+    const path = (request.url ?? "").split("?", 1)[0] ?? "";
+    if (path === "/health") {
       send(response, 200, { status: "ok" });
       return;
     }
-    if (!request.url?.startsWith("/mcp")) {
+    if (!path.startsWith("/mcp")) {
       send(response, 404, { error: "not found" });
       return;
     }
@@ -168,9 +196,24 @@ const server = createServer((request, response) => {
       send(response, 405, { error: "method not allowed" });
       return;
     }
+    let body: string;
+    try {
+      body = await readBody(request);
+    } catch (error) {
+      const tooLarge = error instanceof BodyTooLarge;
+      send(response, tooLarge ? 413 : 400, {
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32600,
+          message: tooLarge ? error.message : "could not read the request body",
+        },
+      });
+      return;
+    }
     let message: JsonRpcRequest;
     try {
-      message = JSON.parse(await readBody(request)) as JsonRpcRequest;
+      message = JSON.parse(body) as JsonRpcRequest;
     } catch {
       send(response, 400, {
         jsonrpc: "2.0",

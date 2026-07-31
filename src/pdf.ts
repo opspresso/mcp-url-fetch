@@ -13,9 +13,39 @@
 
 import { extractText, getDocumentProxy } from "unpdf";
 
+/**
+ * `Math.sumPrecise` is a TC39 proposal, and no Node this runs on has it — not
+ * the 22 the image pins, not 26. The PDF.js build inside `unpdf` calls it while
+ * rebuilding an embedded font's glyph tables, so every font throws a TypeError
+ * that PDF.js catches and reports as a warning: one line per font, thirty-three
+ * of them for a fifteen-page paper. Two costs, and the second is the reason this
+ * is here — the font rebuild is abandoned rather than done, and the noise buries
+ * the failure lines `server.ts` writes on purpose in the same stream.
+ *
+ * Neumaier summation, not the proposal's exactly-rounded algorithm: the sums
+ * asked for are glyph byte counts and column widths, and carrying Shewchuk's
+ * expansion for three call sites that add integers would be the wrong trade. It
+ * is installed only if absent, so a future runtime's own implementation wins.
+ */
+const math = Math as unknown as { sumPrecise?: (values: Iterable<number>) => number };
+if (typeof math.sumPrecise !== "function") {
+  math.sumPrecise = (values) => {
+    let sum = 0;
+    let compensation = 0;
+    for (const value of values) {
+      const next = sum + value;
+      // The larger magnitude keeps its bits; the smaller one is what rounding
+      // drops, so that is the side the lost low bits are recovered from.
+      compensation +=
+        Math.abs(sum) >= Math.abs(value) ? sum - next + value : value - next + sum;
+      sum = next;
+    }
+    return sum + compensation;
+  };
+}
+
 export interface PdfText {
   text: string;
-  truncated: boolean;
   /** What was returned, in the document's own units. */
   note: string;
 }
@@ -54,8 +84,28 @@ export async function pdfToText(bytes: Uint8Array, maxChars: number): Promise<Pd
   } catch (error) {
     throw new PdfError(describe(error));
   }
+  // Outside the catch on purpose: a PdfError raised by the accounting below is
+  // already the answer, and re-wrapping it would file "this is a scan" under
+  // "the PDF could not be parsed".
+  return selectPages(pages, totalPages, maxChars);
+}
 
+/**
+ * Which pages fit the budget, and what to say about what did not.
+ *
+ * Separate from the extraction above so it can be tested without a PDF, which
+ * is the same split the rest of this server uses for its decisions. It is worth
+ * the seam: this is where the edges are, and every one of them ends in the
+ * answer being *no text at all* if it is got wrong.
+ */
+export function selectPages(pages: string[], totalPages: number, maxChars: number): PdfText {
   const cleaned = pages.map((page) => page.replace(/[^\S\n]+/g, " ").trim());
+  if (cleaned.length === 0) {
+    // Ahead of the scan check below, which `[].every` would answer `true` — a
+    // document with no pages has no text layer to be missing, and sending the
+    // model to find an OCR path for it is a dead end it cannot detect.
+    throw new PdfError("the PDF has no pages, so there is nothing to extract");
+  }
   if (cleaned.every((page) => page === "")) {
     // Silence here would be read as "the document is empty", which is a
     // different and much more damaging answer than "I could not read it".
@@ -76,20 +126,33 @@ export async function pdfToText(bytes: Uint8Array, maxChars: number): Promise<Pd
     length += addition;
   }
 
-  // A first page that alone exceeds the budget would otherwise return nothing at
-  // all; a hard cut is worse than a page boundary but far better than silence.
-  if (kept.length === 0) {
+  // A page too large for the budget on its own would otherwise return nothing at
+  // all — and blank pages ahead of it are kept for free, so a full `kept` is not
+  // the same as a `kept` with text in it. That case looked like a success and
+  // read as "the document is empty". A hard cut is worse than a page boundary
+  // and far better than the silence.
+  if (kept.every((page) => page === "")) {
+    // Safe: the all-blank document threw above, so there is a page with text.
+    const first = cleaned.findIndex((page) => page !== "");
+    const whole = cleaned[first]!;
+    const text = whole.slice(0, maxChars);
     return {
-      text: cleaned[0]!.slice(0, maxChars),
-      truncated: true,
-      note: `page 1 of ${totalPages}, itself cut at ${maxChars.toLocaleString("en-US")} characters`,
+      text,
+      // Only claim a cut when there was one. A blank page ahead of this one is
+      // charged for a separator, so a page that fits the budget whole can still
+      // be rejected by those two characters and land here — and being told to
+      // expect missing text there sends the model looking for a tail that is not
+      // missing.
+      note:
+        text.length < whole.length
+          ? `page ${first + 1} of ${totalPages}, itself cut at ${maxChars.toLocaleString("en-US")} characters`
+          : `page ${first + 1} of ${totalPages}`,
     };
   }
 
   const truncated = kept.length < cleaned.length;
   return {
     text: kept.join(PAGE_SEPARATOR),
-    truncated,
     note: truncated
       ? `the first ${kept.length} of ${totalPages} pages`
       : `all ${totalPages} page(s)`,

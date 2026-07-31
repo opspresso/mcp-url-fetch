@@ -55,38 +55,24 @@ export class PublicFetchError extends SsrfError {
 }
 
 /**
- * Fetch an operator-controlled URL through one outbound security boundary.
- * Every hop is DNS-checked, redirects may not cross origins (which prevents
- * forwarding stored credentials to another host), and native auto-following
- * is disabled so redirect targets cannot bypass validation.
+ * Fetch a URL through one outbound security boundary. Every hop is DNS-checked
+ * and native auto-following is disabled, so a redirect target cannot reach the
+ * network without having been judged first.
+ *
+ * The URL is one the *model* chose, not one an operator registered, so there is
+ * no earlier point at which anyone approved the address — checking per hop is
+ * not defence in depth here, it is the only check there is.
+ *
+ * Cross-origin redirects are refused rather than re-checked: the guard would
+ * still run on the new host, but a URL that answers by pointing somewhere else
+ * entirely is not the URL that was asked for, and every header the caller set
+ * travels with it.
  */
-export async function fetchPublicUrl(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<Response> {
-  let url =
-    input instanceof Request
-      ? new URL(input.url)
-      : input instanceof URL
-        ? new URL(input.href)
-        : new URL(input);
+export async function fetchPublicUrl(input: string | URL, init?: RequestInit): Promise<Response> {
+  // A copy either way — the loop below reassigns this on every redirect hop.
+  let url = new URL(input);
   const originalOrigin = url.origin;
-  const requestBody =
-    input instanceof Request && input.method !== "GET" && input.method !== "HEAD"
-      ? await input.clone().arrayBuffer()
-      : undefined;
-  let requestInit: RequestInit = {
-    ...(input instanceof Request
-      ? {
-          method: input.method,
-          headers: input.headers,
-          body: requestBody,
-          signal: input.signal,
-        }
-      : {}),
-    ...init,
-    redirect: "manual",
-  };
+  let requestInit: RequestInit = { ...init, redirect: "manual" };
 
   for (let redirects = 0; ; redirects += 1) {
     const resolved = await resolvePublicUrl(url.href);
@@ -112,7 +98,12 @@ export async function fetchPublicUrl(
     }
     await response.body?.cancel();
     const next = new URL(location, url);
-    await resolvePublicUrl(next.href);
+    // Before any resolve, and without one of its own. A cross-origin hop is
+    // refused whatever it resolves to, so resolving first only bought a DNS
+    // query for a request that will not be made — and it reported a hop to a
+    // private address on another host as a private address rather than as the
+    // cross-origin redirect it is. The hop that survives this is resolved at the
+    // top of the next iteration, before anything is sent to it.
     if (next.origin !== originalOrigin) {
       throw new PublicFetchError(
         `Cross-origin redirect blocked: ${originalOrigin} -> ${next.origin}`,

@@ -29,6 +29,11 @@ success. "The document has no text layer, it is a scan" is actionable; an empty
 string reads as "the document is empty", which is a different and much more
 damaging answer.
 
+The same rule decides what a URL sent to the wrong tool gets back. When the
+other tool would have taken it — a PDF given to `fetch_image`, a picture given
+to `fetch_document` — the error names that tool, and when neither would, it says
+so instead of sending the caller for a second failure.
+
 ## Why not an SDK
 
 The protocol surface is four methods. The one off-the-shelf server that fit
@@ -45,16 +50,36 @@ browser.
 ## Safety
 
 This server fetches URLs a model chose, which makes it a prompt-injection
-target. It reuses Agent Studio's own outbound boundary verbatim
-(`src/ssrfGuard.ts`, `src/publicFetch.ts`): private, loopback, link-local and
-cloud-metadata addresses are rejected, DNS is re-resolved on every request and
-every redirect hop, the connection is pinned to the checked address, and
-cross-origin redirects are refused.
+target. The outbound boundary (`src/ssrfGuard.ts`, `src/publicFetch.ts`) began
+as Agent Studio's and has since diverged: private, loopback, link-local and
+cloud-metadata addresses are rejected over IPv4 **and** IPv6, DNS is re-resolved
+on every request and every redirect hop, the connection is pinned to the checked
+address, and cross-origin redirects are refused.
+
+The IPv6 side is a range table rather than a prefix match on the text, because
+several IPv6 ranges carry an IPv4 address inside them and are globally routable
+in their own right. `64:ff9b::a9fe:a9fe` is the cloud metadata endpoint on any
+network with NAT64; `::ffff:`, its translated spelling `::ffff:0:`, `2002::` and
+the deprecated IPv4-compatible form reach the same places. Each is judged on the
+address it carries, so the public internet still resolves through them — and an
+address the table cannot parse is refused rather than judged on however much of
+it did parse.
 
 On top of that: 5MB for an image and 10MB for a document (declared length
 checked first, then the stream cut the moment it goes over — a lying
-`content-length` must not decide how much is read into memory), 90,000
-characters of extracted text, a 15s timeout, and a content-type allowlist.
+`content-length` must not decide how much is read into memory), 2M characters of
+HTML handed to the converter, 90,000 characters of extracted text, a 15s
+timeout, and a content-type allowlist. Inbound, a request body over 64KB is a
+413 with the limit in it rather than a parse error.
+
+The HTML ceiling is about cost, not safety. Conversion is a chain of
+whole-string rewrites, so a 10MB page was ~300ms of *synchronous* work — paid by
+every other request in flight, health checks included — and a few hundred MB of
+intermediate strings, to produce 9.9M characters that the 90,000-character
+budget then threw away. Cutting the source first returns the identical answer
+whenever the page's text fills the budget regardless — which is nearly always,
+since prose is rarely under 5% of a document's bytes — and on the page where it
+does cost something, the result says so.
 
 ### Authentication has two modes
 
@@ -110,8 +135,16 @@ failure they cannot.
     MCP_API_KEY=<secret> PORT=3000 node dist/server.js   # authenticated
     PORT=3000 node dist/server.js                        # open — cluster-internal only
 
-    POST /mcp      JSON-RPC; Authorization: Bearer <MCP_API_KEY> when a key is set
-    GET  /health   liveness
+    POST   /mcp      JSON-RPC; Authorization: Bearer <MCP_API_KEY> when a key is set
+    DELETE /mcp      session teardown; 204, since this server holds no session
+    GET    /health   liveness
+
+A tag publishes a `linux/amd64` image to GHCR, and to a private ECR mirror for
+the cluster this runs in. It runs as the unprivileged `node` user and needs no
+writable volume:
+
+    docker run -e MCP_API_KEY=<secret> -p 3000:3000 \
+      ghcr.io/opspresso/mcp-url-fetch:latest
 
 ## Develop
 
@@ -121,9 +154,14 @@ failure they cannot.
     npm test             # node --test, no test framework
     npm run build        # tsc -p tsconfig.build.json (tests excluded from dist)
 
-Tests cover the pure decisions — HTML conversion, entity and charset decoding,
-content-type classification, truncation messages. Nothing in them touches the
-network; the fetch path is exercised against real URLs by hand.
+Tests cover the pure decisions — the outbound boundary's address ranges, HTML
+conversion, entity and charset decoding, content-type classification, PDF page
+accounting, truncation messages, bearer-token matching, and the version a client
+is told. Nothing in them touches the network: the guard takes an injectable
+resolver, and the fetch path itself is exercised against real URLs by hand.
+
+`Verify` runs the same three commands, plus a `docker build`, on every pull
+request. The release workflow runs them again on the tag.
 
 ## Connect from an MCP client
 

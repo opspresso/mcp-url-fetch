@@ -14,6 +14,7 @@
 import { fetchPublicUrl } from "./publicFetch.js";
 import { htmlToText } from "./html.js";
 import { pdfToText, PdfError } from "./pdf.js";
+import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 /** Matches what Agent Studio accepts from a user, so nothing arrives it cannot use. */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -31,6 +32,24 @@ export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
  * limit was hit.
  */
 export const MAX_TEXT_CHARS = 90_000;
+
+/**
+ * HTML source handed to the converter.
+ *
+ * `MAX_DOCUMENT_BYTES` bounds what a *parser* is given, which is the right
+ * bound for a PDF: the parser needs the whole file. HTML is not parsed, it is
+ * rewritten by a chain of whole-string regex passes, so its cost is linear in
+ * the source and paid up front — a 10MB page is ~300ms of synchronous work and
+ * a few hundred MB of intermediate strings to produce ~9.9M characters that
+ * `MAX_TEXT_CHARS` then cuts to 90,000.
+ *
+ * Nothing is single-threaded by accident here: that 300ms is paid by every
+ * other request in flight, health checks included, and the intermediates are
+ * what a memory limit notices. 2M characters of markup is far more than any
+ * page needs to yield 90,000 characters of text — prose is rarely under 5% of
+ * a document's bytes — so the cap costs nothing real and bounds the rest.
+ */
+export const MAX_HTML_CHARS = 2_000_000;
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -55,8 +74,33 @@ export const TEXTUAL_TYPES = new Set([
 const HTML_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 const PDF_TYPE = "application/pdf";
 
-const DOCUMENT_ACCEPT = [...TEXTUAL_TYPES, ...HTML_TYPES, PDF_TYPE].join(", ");
-const IMAGE_ACCEPT = [...SUPPORTED_IMAGE_TYPES].join(", ");
+/**
+ * The listed types, then a catch-all at the lowest weight. The weight keeps the
+ * named types winning any negotiation.
+ *
+ * Without the catch-all, a server that honours Accept will refuse to send the
+ * two things `documentKind` goes out of its way to accept: a PDF it labels
+ * `application/octet-stream`, and an unregistered `text/` subtype like
+ * `text/x-log`. The sniff would then be unreachable through this server's own
+ * request.
+ *
+ * The image request carries one for the mirror-image reason. What comes back
+ * when it is *not* an image is the only thing `crossToolHint` has to work from,
+ * and a 406 carries no content-type at all — so a PDF asked of `fetch_image`
+ * would come back as "the server answered 406" rather than as the name of the
+ * tool that reads it.
+ */
+const DOCUMENT_ACCEPT = `${[...TEXTUAL_TYPES, ...HTML_TYPES, PDF_TYPE].join(", ")}, */*;q=0.1`;
+const IMAGE_ACCEPT = `${[...SUPPORTED_IMAGE_TYPES].join(", ")}, */*;q=0.1`;
+
+/**
+ * Node's fetch sends `user-agent: node`, which a good share of the edge blocks
+ * or challenges outright — and reading arbitrary public URLs is the entire job,
+ * so that shows up as "the server answered 403" with the cause on this side.
+ * Naming the build and linking the source is also what lets a site owner who
+ * sees this in their logs find out what it is.
+ */
+const USER_AGENT = `${SERVER_NAME}/${SERVER_VERSION} (+https://github.com/opspresso/mcp-url-fetch)`;
 
 export type DocumentKind = "text" | "html" | "pdf";
 
@@ -68,7 +112,11 @@ export interface FetchedImage {
 export interface FetchedDocument {
   text: string;
   mimeType: string;
-  /** What came back, in the document's own units, when not all of it did. */
+  /**
+   * What came back, in the document's own units. The text paths set it only
+   * when something was cut; the PDF path always does, because "all 12 pages" is
+   * itself the answer to whether extraction reached the end of the document.
+   */
   note?: string;
 }
 
@@ -177,6 +225,27 @@ export function truncateText(
 }
 
 /**
+ * What came back, for a body the source cap may have cut before the text budget
+ * did.
+ *
+ * Cutting the source can leave the text inside its own budget, so a page that
+ * lost its tail would otherwise come back looking complete — both cuts have to
+ * be stated when both happened. `note`'s total is not quoted in that case: it is
+ * the length of the text of an *already cut* source, so naming it as the
+ * document's own total understates the page by however much was cut, and does it
+ * in the one sentence the model has to judge completeness by.
+ */
+export function scopeOf(sourceWasCut: boolean, note?: string): string | undefined {
+  if (!sourceWasCut) {
+    return note;
+  }
+  const fromPage = `the first ${MAX_HTML_CHARS.toLocaleString("en-US")} characters of the page`;
+  return note
+    ? `the first ${MAX_TEXT_CHARS.toLocaleString("en-US")} characters of the text of ${fromPage}`
+    : `the text of ${fromPage}`;
+}
+
+/**
  * Read a body with a hard ceiling.
  *
  * The declared length is checked first and separately: a `content-length` that
@@ -225,7 +294,7 @@ async function readCapped(response: Response, maxBytes: number, what: string): P
 async function get(url: string, accept: string): Promise<Response> {
   const response = await fetchPublicUrl(url, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    headers: { Accept: accept },
+    headers: { Accept: accept, "User-Agent": USER_AGENT },
   });
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
@@ -248,17 +317,14 @@ export async function fetchImage(url: string): Promise<FetchedImage> {
 export async function fetchDocument(url: string): Promise<FetchedDocument> {
   const response = await get(url, DOCUMENT_ACCEPT);
   const { mimeType, charset } = parseContentType(response.headers.get("content-type"));
-  if (SUPPORTED_IMAGE_TYPES.has(mimeType) || mimeType.startsWith("image/")) {
+  if (mimeType.startsWith("image/")) {
     await response.body?.cancel().catch(() => {});
     throw new ContentError(crossToolHint(mimeType, "document"));
   }
   const bytes = await readCapped(response, MAX_DOCUMENT_BYTES, "document");
   const kind = documentKind(mimeType, bytes);
   if (!kind) {
-    throw new ContentError(
-      `unsupported content type: ${mimeType || "none"}. This tool reads text, CSV, JSON, XML, ` +
-        `HTML and PDF.`,
-    );
+    throw new ContentError(unsupportedDocumentType(mimeType));
   }
 
   if (kind === "pdf") {
@@ -272,12 +338,15 @@ export async function fetchDocument(url: string): Promise<FetchedDocument> {
 
   const declaredCharset = kind === "html" ? (charset ?? charsetFromHtml(bytes)) : charset;
   const decoded = decodeText(bytes, declaredCharset);
-  const body = kind === "html" ? htmlToText(decoded) : decoded.trim();
+  // Plain text is not rewritten, only trimmed and cut, so it is left whole.
+  const source = kind === "html" ? decoded.slice(0, MAX_HTML_CHARS) : decoded;
+  const body = kind === "html" ? htmlToText(source) : decoded.trim();
   if (body === "") {
     throw new ContentError("the document has no readable text");
   }
   const { text, note } = truncateText(body, MAX_TEXT_CHARS);
-  return { text, mimeType, ...(note ? { note } : {}) };
+  const scope = scopeOf(source.length < decoded.length, note);
+  return { text, mimeType, ...(scope ? { note: scope } : {}) };
 }
 
 /**
@@ -297,14 +366,40 @@ export function asUntrustedContent(url: string, text: string, note?: string): st
   );
 }
 
-/** Point the model at the tool that would have worked. */
-function crossToolHint(mimeType: string, wanted: "image" | "document"): string {
+/** Said in one place, so the two paths that refuse a body cannot disagree. */
+function unsupportedDocumentType(mimeType: string): string {
+  return (
+    `unsupported content type: ${mimeType || "none"}. This tool reads text, CSV, JSON, XML, ` +
+    `HTML and PDF.`
+  );
+}
+
+/**
+ * Point the model at the tool that would have worked, when one would have.
+ *
+ * Only when one would have, in both directions. `image/svg+xml` is an image type
+ * `fetch_image` does not return, so sending a document request there buys the
+ * model a second failure and one more turn — which is the loop this exists to
+ * end, not to move.
+ */
+export function crossToolHint(mimeType: string, wanted: "image" | "document"): string {
   const seen = mimeType || "an unknown type";
-  if (wanted === "image" && mimeType !== "") {
+  if (wanted === "document") {
+    return SUPPORTED_IMAGE_TYPES.has(mimeType)
+      ? `this URL is ${seen} — use fetch_image to get the picture itself`
+      : unsupportedDocumentType(mimeType);
+  }
+  // The body was cancelled before this ran, so the magic-byte sniff inside
+  // `documentKind` has nothing to look at. A type that declares nothing about
+  // its contents is sent on regardless: `fetch_document` is the one that can
+  // read the bytes, and a PDF served as `application/octet-stream` is the case
+  // that sniff was written for.
+  const opaque = mimeType === "" || mimeType === "application/octet-stream";
+  if (opaque || documentKind(mimeType, new Uint8Array(0))) {
     return `this URL is ${seen}, not an image — use fetch_document to read it as text`;
   }
-  if (wanted === "document") {
-    return `this URL is ${seen} — use fetch_image to get the picture itself`;
-  }
-  return `unsupported content type: ${seen}`;
+  return (
+    `this URL is ${seen}, which is not one of the image formats this tool returns: ` +
+    `${[...SUPPORTED_IMAGE_TYPES].join(", ")}`
+  );
 }
