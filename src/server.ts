@@ -87,20 +87,22 @@ async function callTool(name: unknown, args: { url?: unknown }): Promise<unknown
     const what = name === "fetch_image" ? "image" : "document";
     // The model is told; without this the operator is not, and "everything to
     // that host started failing on Tuesday" has no evidence behind it anywhere.
-    console.warn(`${String(name)} failed: ${withoutQuery(args.url)} — ${reason}`);
+    console.warn(`${String(name)} failed: ${originOf(args.url)} — ${reason}`);
     return toolError(`Error: could not fetch the ${what} — ${reason}`);
   }
 }
 
 /**
- * Origin and path only. The URL is one the model read out of some other tool's
- * output, and those carry signed query strings — a log line is the last place a
- * capability URL should come to rest.
+ * The origin, and nothing else. The URL is one the model read out of some other
+ * tool's output, and those carry their capability in the URL itself — a signed
+ * query string, or a secret path segment as a Slack webhook does. A log line is
+ * the last place either should come to rest, and the question this line is here
+ * to answer — "everything to that host started failing on Tuesday" — is asked
+ * about the host.
  */
-function withoutQuery(url: string): string {
+function originOf(url: string): string {
   try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
+    return new URL(url).origin;
   } catch {
     return "(unparseable url)";
   }
