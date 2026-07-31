@@ -75,16 +75,23 @@ const HTML_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 const PDF_TYPE = "application/pdf";
 
 /**
- * The listed types, then a catch-all at the lowest weight.
+ * The listed types, then a catch-all at the lowest weight. The weight keeps the
+ * named types winning any negotiation.
  *
  * Without the catch-all, a server that honours Accept will refuse to send the
  * two things `documentKind` goes out of its way to accept: a PDF it labels
  * `application/octet-stream`, and an unregistered `text/` subtype like
  * `text/x-log`. The sniff would then be unreachable through this server's own
- * request. The weight keeps the named types winning any negotiation.
+ * request.
+ *
+ * The image request carries one for the mirror-image reason. What comes back
+ * when it is *not* an image is the only thing `crossToolHint` has to work from,
+ * and a 406 carries no content-type at all — so a PDF asked of `fetch_image`
+ * would come back as "the server answered 406" rather than as the name of the
+ * tool that reads it.
  */
 const DOCUMENT_ACCEPT = `${[...TEXTUAL_TYPES, ...HTML_TYPES, PDF_TYPE].join(", ")}, */*;q=0.1`;
-const IMAGE_ACCEPT = [...SUPPORTED_IMAGE_TYPES].join(", ");
+const IMAGE_ACCEPT = `${[...SUPPORTED_IMAGE_TYPES].join(", ")}, */*;q=0.1`;
 
 /**
  * Node's fetch sends `user-agent: node`, which a good share of the edge blocks
