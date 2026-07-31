@@ -17,8 +17,8 @@ concurrency:
 
 env:
   AWS_REGION: ap-northeast-2
-  ECR_IMAGE: 396608815058.dkr.ecr.ap-northeast-2.amazonaws.com/mcp-image-fetch
-  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/mcp-image-fetch
+  ECR_IMAGE: 396608815058.dkr.ecr.ap-northeast-2.amazonaws.com/mcp-url-fetch
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/mcp-url-fetch
 
 jobs:
   verify:
@@ -30,6 +30,7 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
 
   release:
     needs: verify
@@ -41,7 +42,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::396608815058:role/github--mcp-image-fetch-ecr
+          role-to-assume: arn:aws:iam::396608815058:role/github--mcp-url-fetch-ecr
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to ECR

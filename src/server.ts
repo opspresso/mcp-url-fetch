@@ -1,10 +1,11 @@
 /**
- * An MCP server with one tool: fetch an image URL and hand back its bytes.
+ * An MCP server that turns a URL into something a model can use: a picture as
+ * bytes, a document as text.
  *
- * It exists because a URL is not an image. An agent that reads a picture's
- * address out of some other tool — a Slack avatar, a search result — cannot do
- * anything with it: the bytes are never in hand, so there is nothing to edit or
- * pass to an image model. This closes that gap, and only that gap.
+ * It exists because a URL is not its contents. An agent that reads an address
+ * out of some other tool — a Slack avatar, a search result, a link in a ticket —
+ * cannot do anything with it: the bytes are never in hand, so there is nothing
+ * to look at, edit, or read. This closes that gap, and only that gap.
  *
  * The protocol is implemented directly rather than through an SDK. The surface
  * is four methods, and the one dependency that mattered here — an SDK whose
@@ -14,17 +15,15 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { fetchPublicUrl } from "./publicFetch.js";
-
+import { asUntrustedContent, ContentError, fetchDocument, fetchImage } from "./fetchContent.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
+const SERVER_NAME = "mcp-url-fetch";
+/** Tracks `version` in package.json; both are what a client is told this is. */
+const SERVER_VERSION = "1.1.0";
 const PORT = Number(process.env.PORT ?? 3000);
 /** Shared secret every caller must present. Unset means the server refuses to start. */
 const API_KEY = process.env.MCP_API_KEY;
-/** Matches what Agent Studio accepts from a user, so nothing arrives it cannot use. */
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const FETCH_TIMEOUT_MS = 15_000;
 const MAX_BODY_BYTES = 64 * 1024;
 
 interface JsonRpcRequest {
@@ -34,20 +33,31 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-const TOOL = {
-  name: "fetch_image",
-  description:
-    "Download an image from an https URL and return its bytes, so the image can be looked at, " +
-    "edited, or handed to an image model. Use this when another tool gave you a picture's " +
-    "address rather than the picture. Returns the image itself, not a description of it.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      url: { type: "string", description: "Absolute http(s) URL of the image." },
-    },
-    required: ["url"],
-  },
+const URL_PROPERTY = {
+  url: { type: "string", description: "Absolute http(s) URL." },
 } as const;
+
+const TOOLS = [
+  {
+    name: "fetch_image",
+    description:
+      "Download an image from an https URL and return its bytes, so the image can be looked at, " +
+      "edited, or handed to an image model. Use this when another tool gave you a picture's " +
+      "address rather than the picture. Returns the image itself, not a description of it. " +
+      "For a document at a URL, use fetch_document instead.",
+    inputSchema: { type: "object", properties: URL_PROPERTY, required: ["url"] },
+  },
+  {
+    name: "fetch_document",
+    description:
+      "Download a document or web page from an https URL and return its text. Handles plain " +
+      "text, Markdown, CSV, JSON, XML, HTML (converted to readable text) and PDF (text " +
+      "extracted). Use this to read something you only have a link to — a report, a spec, a " +
+      "data file, an article. Returns the contents, not a summary. For an image, use " +
+      "fetch_image instead.",
+    inputSchema: { type: "object", properties: URL_PROPERTY, required: ["url"] },
+  },
+] as const;
 
 /** Constant-time compare so a wrong key cannot be found one character at a time. */
 function keyMatches(presented: string): boolean {
@@ -62,29 +72,41 @@ function authorized(request: IncomingMessage): boolean {
   return token.length > 0 && keyMatches(token);
 }
 
-async function fetchImage(url: string): Promise<{ data: string; mimeType: string }> {
-  const response = await fetchPublicUrl(url, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    headers: { Accept: [...SUPPORTED_IMAGE_TYPES].join(", ") },
-  });
-  if (!response.ok) {
-    throw new Error(`the server answered ${response.status}`);
+function toolError(text: string): unknown {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+async function callTool(name: unknown, args: { url?: unknown }): Promise<unknown> {
+  if (typeof args.url !== "string" || !args.url) {
+    return toolError("Error: `url` is required.");
   }
-  const mimeType = (response.headers.get("content-type") ?? "").split(";")[0]?.trim() ?? "";
-  if (!SUPPORTED_IMAGE_TYPES.has(mimeType)) {
-    throw new Error(`unsupported content type: ${mimeType || "none"}`);
+  try {
+    if (name === "fetch_image") {
+      // The image block is the whole point: a base64 string in a text block is
+      // just text, and a client cannot turn it back into a picture.
+      return { content: [{ type: "image", ...(await fetchImage(args.url)) }] };
+    }
+    const { text, note } = await fetchDocument(args.url);
+    // Text, never a binary resource: a consumer handed a non-image blob decodes
+    // it as UTF-8, and arbitrary bytes decode to replacement characters rather
+    // than to an error. Extraction has to happen here or not at all.
+    return { content: [{ type: "text", text: asUntrustedContent(args.url, text, note) }] };
+  } catch (error) {
+    // A failed fetch is the model's problem to react to, not the run's, so it
+    // comes back as a tool error rather than a protocol one.
+    const reason = error instanceof ContentError ? error.message : describe(error);
+    const what = name === "fetch_image" ? "image" : "document";
+    return toolError(`Error: could not fetch the ${what} — ${reason}`);
   }
-  // Declared length first, then the real one: a lying header must not decide
-  // how much is read into memory.
-  const declared = Number(response.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
-    throw new Error(`image is ${declared} bytes, over the ${MAX_IMAGE_BYTES} limit`);
+}
+
+function describe(error: unknown): string {
+  if (error instanceof Error) {
+    return error.name === "TimeoutError" || error.name === "AbortError"
+      ? "the request timed out"
+      : error.message;
   }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_IMAGE_BYTES) {
-    throw new Error(`image is ${bytes.byteLength} bytes, over the ${MAX_IMAGE_BYTES} limit`);
-  }
-  return { data: Buffer.from(bytes).toString("base64"), mimeType };
+  return String(error);
 }
 
 async function handle(message: JsonRpcRequest): Promise<unknown> {
@@ -93,30 +115,16 @@ async function handle(message: JsonRpcRequest): Promise<unknown> {
       return {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "mcp-image-fetch", version: "1.0.0" },
+        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
       };
     case "tools/list":
-      return { tools: [TOOL] };
+      return { tools: TOOLS };
     case "tools/call": {
       const name = message.params?.name;
-      if (name !== TOOL.name) {
+      if (!TOOLS.some((tool) => tool.name === name)) {
         throw new Error(`unknown tool: ${String(name)}`);
       }
-      const args = (message.params?.arguments ?? {}) as { url?: unknown };
-      if (typeof args.url !== "string" || !args.url) {
-        return { content: [{ type: "text", text: "Error: `url` is required." }], isError: true };
-      }
-      try {
-        const image = await fetchImage(args.url);
-        // The image block is the whole point: a base64 string in a text block
-        // is just text, and a client cannot turn it back into a picture.
-        return { content: [{ type: "image", ...image }] };
-      } catch (error) {
-        // A failed fetch is the model's problem to react to, not the run's, so
-        // it comes back as a tool error rather than a protocol one.
-        const reason = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: "text", text: `Error: could not fetch the image — ${reason}` }], isError: true };
-      }
+      return callTool(name, (message.params?.arguments ?? {}) as { url?: unknown });
     }
     default:
       throw new Error(`unsupported method: ${message.method}`);
@@ -203,7 +211,7 @@ if (!API_KEY) {
 }
 
 server.listen(PORT, () => {
-  console.log(`mcp-image-fetch listening on :${PORT} (POST /mcp)`);
+  console.log(`${SERVER_NAME} listening on :${PORT} (POST /mcp)`);
 });
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
