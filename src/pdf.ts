@@ -15,7 +15,6 @@ import { extractText, getDocumentProxy } from "unpdf";
 
 export interface PdfText {
   text: string;
-  truncated: boolean;
   /** What was returned, in the document's own units. */
   note: string;
 }
@@ -54,7 +53,21 @@ export async function pdfToText(bytes: Uint8Array, maxChars: number): Promise<Pd
   } catch (error) {
     throw new PdfError(describe(error));
   }
+  // Outside the catch on purpose: a PdfError raised by the accounting below is
+  // already the answer, and re-wrapping it would file "this is a scan" under
+  // "the PDF could not be parsed".
+  return selectPages(pages, totalPages, maxChars);
+}
 
+/**
+ * Which pages fit the budget, and what to say about what did not.
+ *
+ * Separate from the extraction above so it can be tested without a PDF, which
+ * is the same split the rest of this server uses for its decisions. It is worth
+ * the seam: this is where the edges are, and every one of them ends in the
+ * answer being *no text at all* if it is got wrong.
+ */
+export function selectPages(pages: string[], totalPages: number, maxChars: number): PdfText {
   const cleaned = pages.map((page) => page.replace(/[^\S\n]+/g, " ").trim());
   if (cleaned.every((page) => page === "")) {
     // Silence here would be read as "the document is empty", which is a
@@ -76,20 +89,23 @@ export async function pdfToText(bytes: Uint8Array, maxChars: number): Promise<Pd
     length += addition;
   }
 
-  // A first page that alone exceeds the budget would otherwise return nothing at
-  // all; a hard cut is worse than a page boundary but far better than silence.
-  if (kept.length === 0) {
+  // A page too large for the budget on its own would otherwise return nothing at
+  // all — and blank pages ahead of it are kept for free, so a full `kept` is not
+  // the same as a `kept` with text in it. That case looked like a success and
+  // read as "the document is empty". A hard cut is worse than a page boundary
+  // and far better than the silence.
+  if (kept.every((page) => page === "")) {
+    // Safe: the all-blank document threw above, so there is a page with text.
+    const first = cleaned.findIndex((page) => page !== "");
     return {
-      text: cleaned[0]!.slice(0, maxChars),
-      truncated: true,
-      note: `page 1 of ${totalPages}, itself cut at ${maxChars.toLocaleString("en-US")} characters`,
+      text: cleaned[first]!.slice(0, maxChars),
+      note: `page ${first + 1} of ${totalPages}, itself cut at ${maxChars.toLocaleString("en-US")} characters`,
     };
   }
 
   const truncated = kept.length < cleaned.length;
   return {
     text: kept.join(PAGE_SEPARATOR),
-    truncated,
     note: truncated
       ? `the first ${kept.length} of ${totalPages} pages`
       : `all ${totalPages} page(s)`,
