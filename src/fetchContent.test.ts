@@ -10,11 +10,13 @@ import { test } from "node:test";
 import {
   asUntrustedContent,
   charsetFromHtml,
+  crossToolHint,
   decodeText,
   documentKind,
   MAX_HTML_CHARS,
   MAX_TEXT_CHARS,
   parseContentType,
+  scopeOf,
   truncateText,
 } from "./fetchContent.js";
 import { htmlToText } from "./html.js";
@@ -102,14 +104,65 @@ test("capping the HTML source does not change the answer", () => {
   // whose output MAX_TEXT_CHARS discards. If a future change to the cap or to
   // the converter made the capped and uncapped results differ, the cap would be
   // silently losing content instead of losing waste.
-  const paragraph = `<p>${"lorem ipsum dolor sit amet ".repeat(20)}</p>`;
-  const page = paragraph.repeat(Math.ceil((MAX_HTML_CHARS * 1.1) / paragraph.length));
+  //
+  // The scripts are what give this teeth. The cut lands wherever the arithmetic
+  // puts it, and one landing inside a <script> is how a cap that "loses only
+  // waste" starts handing back the script instead.
+  const unit =
+    `<p>${"lorem ipsum dolor sit amet ".repeat(20)}</p>` +
+    `<script>var junk = "${"0123456789".repeat(10)}";</script>`;
+  const page = unit.repeat(Math.ceil((MAX_HTML_CHARS * 1.1) / unit.length));
   assert.ok(page.length > MAX_HTML_CHARS);
 
   const whole = htmlToText(page).slice(0, MAX_TEXT_CHARS);
   const capped = htmlToText(page.slice(0, MAX_HTML_CHARS)).slice(0, MAX_TEXT_CHARS);
   assert.equal(capped.length, MAX_TEXT_CHARS);
   assert.equal(capped, whole);
+  assert.ok(!capped.includes("junk"));
+
+  // And a cut placed inside a script, which the arithmetic above does not
+  // choose for itself.
+  const midScript = page.slice(0, unit.length * 3 + unit.indexOf("<script>") + 25);
+  assert.ok(!htmlToText(midScript).includes("junk"));
+});
+
+test("a page cut twice says so twice, and quotes no total it does not have", () => {
+  const cap = MAX_HTML_CHARS.toLocaleString("en-US");
+  const budget = MAX_TEXT_CHARS.toLocaleString("en-US");
+  const textNote = "the first 90,000 of 130,000 characters";
+
+  assert.equal(scopeOf(false, undefined), undefined);
+  assert.equal(scopeOf(false, textNote), textNote);
+  assert.equal(scopeOf(true, undefined), `the text of the first ${cap} characters of the page`);
+
+  const both = scopeOf(true, textNote);
+  assert.equal(
+    both,
+    `the first ${budget} characters of the text of the first ${cap} characters of the page`,
+  );
+  // 130,000 is the text of a source that was already cut, not the document's
+  // own total. Repeating it as one understates the page by whatever was cut.
+  assert.ok(!both?.includes("130,000"));
+});
+
+test("the cross-tool hint only redirects when the other tool would take it", () => {
+  // In both directions. An SVG is an image type fetch_image does not return, so
+  // a document request sent there buys a second failure and one more turn —
+  // which is the loop this is meant to end, not to move.
+  assert.match(crossToolHint("image/png", "document"), /use fetch_image/);
+  assert.match(crossToolHint("image/svg+xml", "document"), /unsupported content type/);
+  assert.ok(!crossToolHint("image/svg+xml", "document").includes("fetch_image"));
+
+  assert.match(crossToolHint("text/csv", "image"), /use fetch_document/);
+  assert.match(crossToolHint("application/zip", "image"), /not one of the image formats/);
+});
+
+test("a type that declares nothing is sent to the tool that can read the bytes", () => {
+  // The body is cancelled before the hint is written, so documentKind's
+  // magic-byte sniff has nothing to look at here — and a PDF served as
+  // application/octet-stream is the case that sniff exists for.
+  assert.match(crossToolHint("application/octet-stream", "image"), /use fetch_document/);
+  assert.match(crossToolHint("", "image"), /use fetch_document/);
 });
 
 test("the HTML cap leaves ample room for a full text budget", () => {
