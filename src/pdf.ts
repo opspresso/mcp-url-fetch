@@ -15,7 +15,7 @@ import { extractText, getDocumentProxy } from "unpdf";
 
 /**
  * `Math.sumPrecise` is a TC39 proposal, and no Node this runs on has it — not
- * the 22 the image pins, not 26. The PDF.js build inside `unpdf` calls it while
+ * the 24 the image pins, not 26. The PDF.js build inside `unpdf` calls it while
  * rebuilding an embedded font's glyph tables, so every font throws a TypeError
  * that PDF.js catches and reports as a warning: one line per font, thirty-three
  * of them for a fifteen-page paper. Two costs, and the second is the reason this

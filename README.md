@@ -150,7 +150,7 @@ writable volume:
 
 ## Develop
 
-    npm install
+    npm install          # Node >= 24
     npm run dev          # tsx, no build step
     npm run typecheck
     npm test             # node --test, no test framework
