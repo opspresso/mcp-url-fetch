@@ -59,11 +59,11 @@ address, and cross-origin redirects are refused.
 The IPv6 side is a range table rather than a prefix match on the text, because
 several IPv6 ranges carry an IPv4 address inside them and are globally routable
 in their own right. `64:ff9b::a9fe:a9fe` is the cloud metadata endpoint on any
-network with NAT64; `::ffff:`, its translated spelling `::ffff:0:`, `2002::` and
-the deprecated IPv4-compatible form reach the same places. Each is judged on the
-address it carries, so the public internet still resolves through them — and an
-address the table cannot parse is refused rather than judged on however much of
-it did parse.
+network with NAT64; `::ffff:`, its translated spelling `::ffff:0:` and `2002::`
+reach the same places. Each of those is judged on the address it carries, so the
+public internet still resolves through them; the deprecated IPv4-compatible form
+is refused outright rather than unwrapped. And an address the table cannot parse
+is refused rather than judged on however much of it did parse.
 
 On top of that: 5MB for an image and 10MB for a document (declared length
 checked first, then the stream cut the moment it goes over — a lying
@@ -140,7 +140,9 @@ failure they cannot.
     GET    /health   liveness
 
 A tag publishes a `linux/amd64` image to GHCR, and to a private ECR mirror for
-the cluster this runs in. It runs as the unprivileged `node` user and needs no
+the cluster this runs in; it also creates a GitHub Release whose notes are the
+commit subjects, and dispatches the released version to the GitOps repository
+that deploys it. The image runs as the unprivileged `node` user and needs no
 writable volume:
 
     docker run -e MCP_API_KEY=<secret> -p 3000:3000 \
